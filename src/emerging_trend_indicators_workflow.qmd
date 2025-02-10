@@ -1,0 +1,190 @@
+---
+title: "Emerging trend indicators of raccoon and other species in Europe"
+editor: visual
+project:
+  type: website
+  output-dir: docs
+  execute-dir: project
+format:
+  html:
+    df-print: paged
+    toc: true
+    toc-float: true
+    toc-depth: 4
+    number-sections: true
+    code-fold: true
+    code-tools: true
+execute:
+  eval: true
+  echo: true
+  warning: true
+  error: false
+  include: true
+from: markdown+emoji
+---
+
+## Introduction
+
+This document shows an example of how using GBIF species occurrence cubes to assess the emerging status of some (alien) species in Europe and at country level. This workflow is strongly based on [**occurrence TrIAS indicators**](https://github.com/trias-project/indicators).
+
+### Setup
+
+First, list and load the needed packages.
+
+```{r pkgs, message=FALSE, warning=FALSE}
+library(readr)
+library(here)
+library(dplyr)
+library(patchwork)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(trias)
+```
+
+## Scope
+
+### Taxonomic scope
+
+The main species of interest is the raccoon (_Procyon lotor (Linnaeus, 1758)_, GBIF Key: [5218786](https://www.gbif.org/species/5218786)). We will also consider other species:
+- [*Xenopus laevis*](https://www.gbif.org/species/5217334) (GBIF key: `5217334`)
+
+The list could be extended in the future.
+
+```{r define-species-of-interest}
+species <- tibble::tibble(
+  specieskey = c(5218786,
+                 5217334),
+  canonical_name = c("Procyon lotor",
+                     "Xenopus laevis")
+)
+```
+
+### Spatial scope
+
+We are interested over the emerging status of the four species in **Europe**. A facetting at country level will follow later.
+
+### Temporal scope
+
+We request a species occurrence cube based on data from **1950**.
+
+## Species occurrence cube
+
+We triggered a GBIF occurrence cube via the [Occurrence SQL Download API](https://techdocs.gbif.org/en/data-use/api-sql-downloads) and on the hand of a JSON query ([query_cube_raccoon.json](../../data/input/query_cube_raccoon.json)). The resulting cube (DOI: [10.15468/dl.rx7qvb](https://doi.org/10.15468/dl.rx7qvb), `downloadKey`: `0011427-250127130748423`) can be downloaded in TSV format from GBIF. We have it saved at `data/input` as [`0011427-250127130748423.csv`](../../data/input/0011427-250127130748423.csv):
+
+```{r read-cube, message=FALSE}
+cube <- readr::read_tsv(
+  here::here(
+    "data",
+    "input",
+    "0011427-250127130748423.csv"
+  )
+)
+```
+
+Preview:
+
+```{r}
+head(cube)
+```
+
+Notice the presence of column `countryCode` as we grouped by country.
+
+## From cubes to emerging status
+
+### Preprocess: from cube to time series
+
+We assess the emerging status of the species in Europe for 2024. First, we create time series up to 2024.
+
+```{r}
+last_year <- 2023
+```
+
+For each species, define cells with at least one observation:
+
+```{r}
+df_cc <-   cube |>
+  dplyr::group_by(specieskey) |>
+  dplyr::distinct(eeacellcode) |>
+  dplyr::ungroup()
+```
+
+For each species, identify the first year with at least one observation:
+
+```{r}
+df_begin_year <-
+  cube |>
+  dplyr::group_by(specieskey) |>
+  dplyr::summarize(begin_year = min(year))
+```
+
+For each species, combine `begin_year` and unique `eeacellcode` as found above:
+
+```{r}
+df_cc <-   df_cc |>
+  dplyr::left_join(df_begin_year, by = "specieskey") |> 
+  dplyr::select(specieskey, begin_year, eeacellcode)
+```
+
+Preview:
+
+```{r}
+head(df_cc)
+```
+
+For each cell (`eeacellcode`) and species (`specieskey`) we can now create a time series:
+
+```{r}
+# Define help function
+make_time_series <- function(eeacellcode, specieskey, begin_year, last_year) {
+  tidyr::expand_grid(
+    eeacellcode = eeacellcode,
+    specieskey = specieskey,
+    year = seq(from = begin_year, to = last_year)
+  )
+}
+
+# Create timeseries slots
+df_ts <- purrr::pmap_dfr(df_cc,
+  .f = make_time_series,
+  last_year = last_year
+)
+
+# Add occurrence data
+df_ts <-
+  df_ts |>
+  dplyr::left_join(
+    cube |> dplyr::select(
+      specieskey,
+      year,
+      eeacellcode,
+      occurrences
+    ),
+    by = c("specieskey", "year", "eeacellcode")
+  )
+
+# Replace NAs with 0
+df_ts <-
+  df_ts |>
+  tidyr::replace_na(list(occurrences = 0))
+```
+
+Add column for presence (1) or absence (0):
+
+```{r}
+df_ts <-
+  df_ts |>
+  dplyr::mutate(
+    ispresent = dplyr::if_else(occurrences > 0, 1, 0)
+  )
+```
+
+Save the time series as an interim output:
+
+```{r save-time-series, message: false}
+readr::write_tsv(
+  df_ts,
+  here::here("data", "interim", "time_series.tsv"),
+  na = ""
+)
+```
